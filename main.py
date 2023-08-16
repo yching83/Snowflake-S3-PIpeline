@@ -1,22 +1,30 @@
 #!/usr/bin/env python
 import pandas as pd
+import boto3
 import sys
 import os
 import io
 import snowflake.connector
-import time
-import json
 import re
 import smart_open
 import tempfile
+import time
+import datetime 
+import json
 import zipfile
 from pathlib import Path
 import logging
-import env_variables
-import review_stage
-import write_to_s3 as myutils
+import app.single_audit_api.env_variables as env_variables
+import app.single_audit_api.table_question_format as review_stage
+import app.single_audit_api.s3_functions as myutils
+import app.single_audit_api.dynamodb_functions as dyno
+import shutil
+import uuid
+from urllib.parse import urlparse, parse_qs
 
 # Credentials for Snowflake Connection
+example_file_name = 'app/single_audit_api/example_json.json'
+read_me_name = 'app/single_audit_api/ReadMe.txt'
 user_field = env_variables.snowflake_username 
 password_field = env_variables.snowflake_password 
 account_identifier = env_variables.snowflake_account_nm 
@@ -27,11 +35,18 @@ role_field = env_variables.snowflake_role_nm
 access_key =  env_variables.dev_aws_access_key
 secret_key = env_variables.dev_aws_secret_key
 arn= env_variables.dev_arn
-
+dev_dynamo_tbl = env_variables.dev_dynamo_table
+dev_s3_bucket = env_variables.dev_s3_bucket
+dev_dynamo_region_name = 'us-east-1'
+AWS_ACCESS_KEY_ID = env_variables.prod_aws_access_key_id 
+AWS_SECRET_ACCESS_KEY = env_variables.prod_aws_secret_access_key 
+AWS_SESSION_TOKEN = env_variables.prod_aws_session_token 
+aws_session_ID = dyno.create_aws_session(access_key, secret_key, dev_dynamo_region_name)
+region_name = 'us-east-1'
 
 # Naming variables to hold directory for the file path in smart open
-folder_id =  'FOLDER_DIRECTORY'
-folder_list = []
+folder_id =  'FOLDER_DIRECTORY' 
+folder_list = [] 
 
 # Create logger file to capture issues during step process
 logging.basicConfig(filename = 'AuditProcess.log', encoding = 'utf-8', level=logging.DEBUG)
@@ -48,6 +63,25 @@ class snowflakeconnection(object):
     def cursor(self):
         self.cs = self.ctx.cursor()
         return self.cs
+
+# Class to declare variables definitions
+class Report:
+    def __init__(self,report_name_api, organization_id, organization_id_string, count_per_batch, submission_list, aws_session, table_name, random_uuid, formatted_string_date, submission_list_elements, dev_zip_names, dev_s3, dev_bucket_name):
+        self.report_name_api = report_name_api
+        self.organization_id = organization_id
+        self.organization_id_string = organization_id_string
+        self.count_per_batch = count_per_batch
+        self.submission_list = submission_list
+        self.aws_session = aws_session
+        self.table_name = table_name
+        self.report_id = random_uuid
+        self.formatted_string_date = formatted_string_date
+        self.submission_list_elements = submission_list_elements
+        self.dev_zip_names = dev_zip_names
+        self.dev_s3 = dev_s3
+        self.dev_bucket_name = dev_bucket_name 
+
+
 
 def try_query_async (name_of_conn, handler_name, cursor_name, execution_query, type_of_form):
     name_of_conn = snowflakeconnection()
@@ -113,49 +147,63 @@ def deliver_files_smartopen(zip_name, dataframes, folder_ids):
         zf.close()
     fout.close()
 
+def download_files_from_s3_returns2(bucket_names, object_keys, destination_paths):
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        aws_session_token=AWS_SESSION_TOKEN
+    )
 
-def deliver_files_smartopen_in_memory(dataframes, folder_ids):    
-    zip_memory = io.BytesIO()
-    zip_uri = "zip://" + zip_memory
-    with smart_open.open(zip_uri, 'wb') as fout:
-        with zipfile.ZipFile(fout, 'w') as zf:
-            starttime  = time.time() 
-            for df, folder_id in zip(dataframes, folder_ids):
-                folder_list = df[folder_id].drop_duplicates().to_list()
-                dfg = df.groupby(folder_id)
+    zip_memory_downloads = []
+    destination_paths_list = []
 
-                for item in folder_list:
-                    df_frame = print_pd_groupby(dfg, grp=[item])
-                    writePath = item
-                    print(writePath)
-                    writePath = os.path.splitext(writePath)[0] + ".csv"
-                    #print(os.path.splitext(writePath)[0])
-                    csv_data = df_frame.to_csv(index=False)
-                    zf.writestr(writePath, csv_data)
-            endstime = time.time()
-            print("Timer for zipping all files: ", (endstime - starttime))
-        zf.close()
-    fout.close()
+    for bucket_name, object_key, destination_path in zip(bucket_names, object_keys, destination_paths):
+        try:
+            file_data = io.BytesIO()  # Create a BytesIO object to store file data
+            s3.download_fileobj(bucket_name, object_key, file_data)
 
+            # Create a new zip memory for each downloaded file
+            zip_memory_download = io.BytesIO()
+            zip_memory_downloads.append(zip_memory_download)
+            destination_paths_list.append(destination_path)
 
-def zip_file_in_memory(dataframes, folder_ids):
-    zip_memory = io.BytesIO()
+            with zipfile.ZipFile(zip_memory_download, 'w') as zf:
+                zf.writestr(object_key, file_data.getvalue())
+
+            print(f"File '{object_key}' downloaded from S3 and added to the ZIP archive")
+
+        except Exception as e:
+            print(f"Error downloading file '{object_key}' from S3: {str(e)}")
+
+    return zip_memory_downloads, destination_paths_list
+
+def create_zip_from_memory(zip_memory_downloads, destination_paths, dataframes, folder_ids, zip_memory=None): 
+    if zip_memory is None:
+        zip_memory = io.BytesIO()
+    else:
+        zip_memory.seek(0)
+
     with zipfile.ZipFile(zip_memory, 'w') as zf:
-        starttime  = time.time() 
+        # Adds the downloadable objects from S3 with designated destination_paths
+        if not zip_memory_downloads:
+            pass
+        else:
+            for zip_memory_download, destination_path in zip(zip_memory_downloads, destination_paths):
+                zf.writestr(destination_path, zip_memory_download.getvalue())
+
+        # Add dataframes in the ZIP archive
         for df, folder_id in zip(dataframes, folder_ids):
             folder_list = df[folder_id].drop_duplicates().to_list()
             dfg = df.groupby(folder_id)
             for item in folder_list:
                 df_frame = print_pd_groupby(dfg, grp=[item])
                 writePath = item
-                print(writePath)
                 writePath = os.path.splitext(writePath)[0] + ".csv"
-                #print(os.path.splitext(writePath)[0])
                 csv_data = df_frame.to_csv(index=False)
                 zf.writestr(writePath, csv_data)
-        endstime = time.time()
+
     zip_memory.seek(0)
-    print("Timer for zipping all files: ", (endstime - starttime))
     return zip_memory
 
 # Expand on this section later for large file attachments
@@ -198,15 +246,33 @@ def json_variable_list(json_element, json_file_called, variable_clause):
     data = json_parse(json_file_called) 
     list_variable = (data[json_element])
     if type (list_variable) == list:
-        #list_of_values = variable_clause + ' in (' + ','.join( str(x) for x in list_variable) + ')'
-        return list_variable
+        list_of_values = variable_clause + ' in (' + ','.join( str(x) for x in list_variable) + ')'
+        return list_of_values, list_variable
     else:
          string_value = variable_clause + ' = ' + '\''+ list_variable + '\''
          return string_value
 
+def generate_uuid():
+    # Generate a random UUID
+    random_uuid = str(uuid.uuid4())
+    return random_uuid
 
-# Program Call Outs
-if __name__ == "__main__":
+def summary_query():
+    query_summary = """
+    select  'This "Read_Me" file explains how to use the folder structure and going through the files and stages in each folder. 
+The folder structure is created based on submission_id as the first level, with all other form types associated with the
+particular submission is then created as its own separate folders.  The sub directories of the folders behind each form type 
+is then broken down into the creation date and time stamp based on the creation date and timestamp of each of the file designated 
+by the "Folder_Directory" path located on the files.  Chronology file will provide an overview of the history behind each 
+submission id in association to all the form steps of each submission.  Form_Data.csv provides a focused data set of each form 
+type based on each submission, and it is saved by path form type > form_data > and creation datetimestamps. '
+as summary, 
+CONCAT('Audit_Folder', '/readme.csv' )
+as folder_directory;
+  """
+    return query_summary
+
+def forms_query_string():
     query_form = """
 with response_field_value_cte as (
     select * from datamart.gms.response_field_value where organization_id =
@@ -286,9 +352,11 @@ select distinct submission_id,
        CONCAT('Audit_Folder', '/Audit_' , SUBMISSION_ID , '/' , FORM_TYPE, '/', FORM_TYPE, '_',replace(FORM_NAME,' ','_') , 
            '/FORM_DATA_' , replace(replace(COMPLETED_AT::varchar(23),' ','_'),':','_'),'/form_data.csv') as folder_directory
 from forms_data where FIELD_LABEL = 'Table Question'
-);
+); 
 """
+    return query_form
 
+def review_stage_string():
     query_review_stage = """
 with response_field_value_cte as (
     select * from datamart.gms.response_field_value where organization_id = 
@@ -333,7 +401,10 @@ rr.review_stage_id is not null
 and rr.organization_id = 
 and rr.submission_id in 
 """
+    return query_review_stage
 
+
+def chronology_string():
     query_chronology = """
 with submit_history as (
 select
@@ -360,7 +431,9 @@ inner join staging.base.ms_submissionhistory ss
 on s.submission_history_id = ss.submissionhistoryid
 
 """
+    return query_chronology
 
+def files_string():
     query_files = """
 with response_field_value_cte as (
     select * from datamart.gms.response_field_value where organization_id =
@@ -403,10 +476,19 @@ from staging.base.files_file f join
 forms_data ff on f.id = ff.sub_field_id;    
    
 """
+    return query_files
 
-    json_file_nm = 'example_json.json'
-    submission_clause = json_variable_list('submission_ids', json_file_nm, 'submission_id')
-    print(f"Submission clause: {submission_clause}")
+def data_definitions():
+    table_name = 'Audit_Dynamo'
+    # Create AWS session for dyanomodb usage
+
+   
+    json_file_nm = example_file_name
+    submission_list, submission_list_elements = json_variable_list('submission_ids', json_file_nm, 'submission_id')
+    
+    # Get the formatted timestamp for each S3 Zip name
+    now = datetime.datetime.now()
+    formatted_string_date = now.strftime("_%m-%d-%Y_%I_%M_%p")
 
     # Open the JSON file
     with open(json_file_nm) as file:
@@ -414,161 +496,318 @@ forms_data ff on f.id = ff.sub_field_id;
         data = json.load(file)
 
     # Access the value using the key "report_name"
-    report_name = data['report_name']
-    organ_id = data['organization_id']
-    # Print the report name
-    r_json_name = 'Patrick Report'
-    string_value = 'organization_id' + ' = ' + '\''+ organ_id + '\''
-    print(string_value)
-    num_of_submissions_to_query = 3
-
-    #Forms Data Query and Separation of Table Questionnaire
-
-    if report_name == r_json_name:
-        i = 0
-        separated_list = ([submission_clause[i:i + num_of_submissions_to_query] for i in range(0, len(submission_clause), num_of_submissions_to_query)])
-        for f_list in separated_list:
-            i= i + 1
-            print(f"f_list: {f_list}")
-            list_of_values = 'submission_id' + ' in (' + ','.join( str(x) for x in f_list) + ')'
-            print(f"List of values: {list_of_values}")
-            replacements = ("organization_id =", string_value), ("submission_id in", (list_of_values))
-            result_form_query = (multiple_replace(query_form, *replacements))
-            # print(result_form_query)
-            df, queryid, conn_handler, cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', result_form_query, "form Data")
-            list_columns = ['SUBMISSION_ID', 'FORM_TYPE','FORM_NAME','FIELD_TYPE','FIELD_LABEL','SUB_FIELD_ID', 'VALUE', 'COMPLETED_AT', 'CREATED_AT','CREATED_USER_EMAIL','FOLDER_DIRECTORY']
-            df.columns = list_columns
-            if i == 1:
-                totaldf = df
-            else:
-                totaldf = pd.concat([totaldf, df], ignore_index = True)
-        
-        cursor_conn.close()
-        conn_handler.close()
-
-    print(totaldf.head(10))
-    print(totaldf.tail(10))
-    final_result_dataframe= totaldf.loc[totaldf["FIELD_LABEL"] != "Table Question"]  #transform_column_values (df, 'SUB_FIELD_ID', 'SUBMISSION_ID',list_columns )
-    logging.info("Merged Number of Rows After Duplicates Removal")
-    print(final_result_dataframe.shape[0])
-    print(final_result_dataframe.head(10))
-    print(final_result_dataframe.tail(10))
-
-    # Review data display
-
-    if report_name == r_json_name:
-        j = 0
-        separated_list = ([submission_clause[j:j + num_of_submissions_to_query] for j in range(0, len(submission_clause), num_of_submissions_to_query)])
-        for r_list in separated_list:
-            j= j + 1
-            list_of_values = 'submission_id' + ' in (' + ','.join( str(x) for x in r_list) + ')'
-            print(f"List of values: {list_of_values}")
-            replacements = ("organization_id =", string_value), ("submission_id in", (list_of_values))
-            r_result_review_query = (multiple_replace(query_review_stage, *replacements))
-            r_df, r_queryid, r_conn_handler, r_cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', r_result_review_query, "review_stage_data")
-            r_list_columns = ['SUBMISSION_ID','STAGE_ID','STAGE_NAME','FORM_ID','STAGE_TYPE','REVIEWER_USER_ID', 'SUBMISSION_ID', 'REVIEWER_EMAIL','FIELD_LABEL','VALUE','FOLDER_DIRECTORY']
-            r_df.columns = r_list_columns
-            if j == 1:
-                total_r_df = r_df
-            else:
-                total_r_df = pd.concat([total_r_df, r_df], ignore_index = True)
-
-        r_cursor_conn.close()
-        r_conn_handler.close()
-    print(total_r_df.head(10))
-    print(total_r_df.tail(10))
-       
-    # Chonology data display
-
-    if report_name == r_json_name:
-        c = 0
-        separated_list = ([submission_clause[c:c + num_of_submissions_to_query] for c in range(0, len(submission_clause), num_of_submissions_to_query)])
-        for r_list in separated_list:
-            c= c + 1
-            list_of_values = 'submission_id' + ' in (' + ','.join( str(x) for x in r_list) + ')'
-            print(f"List of values: {list_of_values}")
-            replacements = ("organization_id =", string_value), ("submission_id in", (list_of_values))
-            c_result_chrnology_query = (multiple_replace(query_chronology, *replacements))
-            c_df, c_queryid, c_conn_handler, c_cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', c_result_chrnology_query, "chronology_form")
-            c_list_columns = ['SUBMISSION_ID','TIMESTAMP','DESCRIPTION', 'NOTE','MESSAGE','EMAILRECIPENTS','FOLDER_DIRECTORY']
-            c_df.columns = c_list_columns
-            if c == 1:
-                total_c_df = c_df
-            else:
-                total_c_df = pd.concat([total_c_df, c_df], ignore_index = True)
-        c_cursor_conn.close()
-        c_conn_handler.close()
-    print(total_c_df.head(10))
-    print(total_c_df.tail(10))
-
-    # s3 bucket path and data outputs
-
-    if report_name == r_json_name:
-        r = 0
-        separated_list = ([submission_clause[r:r + num_of_submissions_to_query] for r in range(0, len(submission_clause), num_of_submissions_to_query)])
-        for r_list in separated_list:
-            r = r + 1
-            list_of_values = 'submission_id' + ' in (' + ','.join( str(x) for x in r_list) + ')'
-            print(f"List of values: {list_of_values}")
-            replacements = ("organization_id =", string_value), ("submission_id in", (list_of_values))
-            rr_query_string = (multiple_replace(query_files, *replacements))
-            rr_df, rr_queryid,rr_conn_handler, rr_cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', rr_query_string, "s3_bucket_names")
-            if r == 1:
-                total_rr_df = rr_df
-            else:
-                total_rr_df = pd.concat([total_rr_df, rr_df], ignore_index = True)
-        rr_cursor_conn.close()
-        rr_conn_handler.close()
-    print(total_rr_df.head(10))
-    rr_list_columns = ['SUBMISSION_ID', 'FILE_ID', 'FILE_NAME', 'FILE_SIZE_BYTES', 'BUCKET_NAME', 'STORAGE_KEY', 'FORM_TYPE', 'FORM_NAME','CREATED_USER_EMAIL', 'COMPLETED_AT', 'FOLDER_DIRECTORY']
-    total_rr_df.columns = rr_list_columns
-    print(total_rr_df.head(10))
-
-
-
-    # Print out dataframes from datasplit
-    #df_matrix = pd.read_csv("result10.csv")
-    df_matrix = totaldf.loc[totaldf["FIELD_LABEL"] == "Table Question"]  
-    df_reviewstage = df_matrix[['SUB_FIELD_ID','VALUE','FOLDER_DIRECTORY']]
-    print(df_reviewstage)
-    
-    # Smart zip all the data outputs from queries via FOLDER_DIRECTORY column
-    df_reviewstage = df_reviewstage.reset_index(drop=True)
-    print(df_reviewstage.head(26))
-    result_review_df = review_stage.read_dataframe(df_reviewstage)
-    
-    dataframes = [final_result_dataframe, total_r_df, total_c_df, result_review_df]
-    folder_ids = ['FOLDER_DIRECTORY','FOLDER_DIRECTORY', 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY']
-
-
-
-    # Define the bucket name and file name
-    filename = 'sample_file.pdf'
-    bucket_name = 'testawsaudit'
-    access_point_name = 's3auditwrite'  # Access point ARN or name
-    region_name = 'us-east-2'
-
+    report_name_api= data['report_name']
+    organization_id = data['organization_id']
+    report_json_name = 'Patrick Report'
+    organization_id_string = 'organization_id' + ' = ' + '\''+ organization_id + '\''
+    count_per_batch = 2
+    aws_session = aws_session_ID
+    random_uuid = generate_uuid()
+    dev_zip_names =  ("Audit" + "Grp" + report_name_api + formatted_string_date + '.zip')
     print("Creating S3 session...")
-    s3 = myutils.create_s3_session(access_key, secret_key, region_name)
-    print(f"Used access_key: {access_key}, secret_key: {secret_key}, region_name: {region_name}, bucket name: {bucket_name}")
-    print("S3 session created!")
-    print(f"Listing contents of S3 bucket {bucket_name}:")
-    myutils.list_bucket_contents(s3, bucket_name)
+    dev_s3 = myutils.create_s3_session(access_key, secret_key, region_name)
+    dev_bucket_name = dev_s3_bucket
 
-    #zip_name = 'audit_y_output.zip'
-    #deliver_files_smartopen(zip_name, dataframes, folder_ids)
-    zip_memory = zip_file_in_memory(dataframes,folder_ids)
-
-    # Then upload the zip_memory to S3 bucket using whatever method you want.
-
-    # Example usage
-    # upload_file_to_s3_using_smart_open(zip_memory, bucket_name, "YC_test.zip", access_key, secret_key)
-    object_key = "audit_test_smart_open_20230528_16h20.zip"
-    myutils.upload_file_to_s3_using_smart_open_with_boto(s3, zip_memory, bucket_name, object_key)
-
-    # Get the link to the recently created file in S3 bucket
-    response = myutils.get_s3_presigned_url(bucket_name, object_key)
-    myutils.list_bucket_contents(s3, bucket_name)
-    if response:
-        print(f"Please access the file {object_key} at the presign URL: {response}")
+    report = Report(
+        report_name_api,
+        organization_id,
+        organization_id_string,
+        count_per_batch,
+        submission_list = submission_list,
+        aws_session = aws_session_ID,
+        table_name = table_name,
+        random_uuid = generate_uuid(),
+        formatted_string_date = formatted_string_date,
+        submission_list_elements =  submission_list_elements,
+        dev_zip_names = dev_zip_names,
+        dev_s3 = dev_s3,
+        dev_bucket_name = dev_bucket_name
+        ) 
     
+    organization_id_used = organization_id
+    report_id_used = random_uuid
+
+    return report, organization_id_used, report_id_used
+
+
+def create_initial_row():
+    # Retrieve the organization_id_used and report_id_used from data_definitions()
+    report, organization_id_used, report_id_used = data_definitions()
+    report_name_used = report.report_name_api
+    submission_list_used = report.submission_list
+    item_data = {
+        'organization_id': organization_id_used,
+        'report_id': report_id_used,
+        'created_at': report.formatted_string_date,
+        'created_by': 'catherine.ching@submittable.com',
+        'is_deleted': False,
+        'report_name': report_name_used,
+        'submission_list': report.submission_list_elements,
+        'total_submissions': len(report.submission_list_elements),
+        'processed_submissions': 0,
+        'status': 'processing',
+        's3_filename': report.dev_zip_names
+    }
+    dyno.put_item(report.aws_session, report.table_name, item_data)
+    
+    
+    return report.aws_session,report.table_name, organization_id_used, report_id_used, report_name_used, report.submission_list_elements
+    
+# (AWS_session, table_name, organization_id, report_id, processed_submissions)
+def update_dynamodb(aws_session, table_name, organization_id_current, report_id_current,processed_submission_count):
+    p = processed_submission_count
+    dyno.update_dynamodb(aws_session, table_name, organization_id_current, report_id_current, p)
+
+def update_dyno_percent(aws_session, table_name, organization_id_current, report_id_current,report_percent):
+    rp = report_percent
+    dyno.update_dyno_percent(aws_session, table_name, organization_id_current, report_id_current,rp)
+
+
+def complete_dynamodb(aws_session, table_name, organization_id_current, report_id_current, status):
+    stat = status
+    dyno.complete_dynamodb(aws_session, table_name, organization_id_current, report_id_current, stat)
+
+def complete_dynamodb_link(aws_session, table_name, organization_id_current, report_id_current, link):
+    s3link = link
+    dyno.complete_dynamodb_link(aws_session, table_name, organization_id_current, report_id_current, s3link)
+
+def complete_dynamodb_s3(aws_session, table_name, organization_id_current, report_id_current, s3_filename):
+    s3_dev_filename = s3_filename
+    dyno.complete_dynamodb_s3(aws_session, table_name, organization_id_current, report_id_current, s3_dev_filename)    
+
+def get_s3_filename():
+    report, organization_id_used, report_id_used = data_definitions()
+    s3_filename = report.dev_zip_names
+    return s3_filename, report_id_used, organization_id_used
+
+
+def get_dfs():
+    report, organization_id_used, report_id_used = data_definitions()
+    replacements = ("organization_id =", report.organization_id_string), ("submission_id in", report.submission_list)
+    query_readme = summary_query()
+    query_form = forms_query_string()
+    result_form_query = (multiple_replace(query_form, *replacements))
+    query_review_stage = review_stage_string()
+    r_result_review_query = (multiple_replace(query_review_stage, *replacements)) 
+    query_chronology = chronology_string()
+    c_result_chrnology_query = (multiple_replace(query_chronology, *replacements))
+    query_files = files_string()
+    rr_query_string = (multiple_replace(query_files, *replacements))
+    s_df, s_queryid, conn_handler, cursor_conn = try_query_async('snowflakeconn', 'ctx2', 'cs2',query_readme, "readme_query")
+    s_list_columns = ['SUMMARY', 'FOLDER_DIRECTORY']
+    if s_df.empty:
+        pass
+    else:
+        s_df.columns = s_list_columns
+    df, queryid, conn_handler, cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', result_form_query,"form_query")
+    list_columns = ['SUBMISSION_ID', 'FORM_TYPE','FORM_NAME','FIELD_TYPE','FIELD_LABEL','SUB_FIELD_ID', 'VALUE', 'COMPLETED_AT', 'CREATED_AT','CREATED_USER_EMAIL','FOLDER_DIRECTORY']
+    if df.empty:
+        pass
+    else:
+        df.columns = list_columns
+        final_result_dataframe= df.loc[df["FIELD_LABEL"] != "Table Question"]
+    r_df, r_queryid, conn_handler, cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', r_result_review_query, "review_stage_data")
+    r_list_columns = ['SUBMISSION_ID','STAGE_ID','STAGE_NAME','FORM_ID','STAGE_TYPE','REVIEWER_USER_ID', 'SUBMISSION_ID', 'REVIEWER_EMAIL','FIELD_LABEL','VALUE','FOLDER_DIRECTORY']
+    if r_df.empty:
+        pass
+    else:
+        r_df.columns = r_list_columns
+    c_df, c_queryid, conn_handler, cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', c_result_chrnology_query, "chronology_form")
+    c_list_columns = ['SUBMISSION_ID','TIMESTAMP','DESCRIPTION', 'NOTE','MESSAGE','EMAILRECIPENTS','FOLDER_DIRECTORY']
+    if c_df.empty:
+        pass
+    else:
+        c_df.columns = c_list_columns
+    rr_df, rr_queryid,conn_handler, cursor_conn = try_query_async('snowflakeconn','ctx2','cs2', rr_query_string, "s3_bucket_names")
+    rr_list_columns = ['SUBMISSION_ID', 'FILE_ID', 'FILE_NAME', 'FILE_SIZE_BYTES', 'BUCKET_NAME', 'STORAGE_KEY', 'FORM_TYPE', 'FORM_NAME','CREATED_USER_EMAIL', 'COMPLETED_AT', 'FOLDER_DIRECTORY']
+    if rr_df.empty:
+        pass
+    else:
+        rr_df.columns = rr_list_columns
+    final_result_dataframe= df.loc[df["FIELD_LABEL"] != "Table Question"]  
+    print(final_result_dataframe)
+    cursor_conn.close()
+    conn_handler.close()
+    # Separated items and cost data frames for Table Questions
+    df_matrix = df.loc[df["FIELD_LABEL"] == "Table Question"]  
+    df_reviewstage = df_matrix[['SUB_FIELD_ID','VALUE','FOLDER_DIRECTORY']]
+    df_reviewstage = df_reviewstage.reset_index(drop=True)
+    result_review_df = review_stage.read_dataframe(df_reviewstage)
+    # Extract the integer value using string manipulation
+    result_review_df['SUBMISSION_ID'] = result_review_df['FOLDER_DIRECTORY'].str.extract(r'Audit_(\d+)/')
+    # Move the 'NewColumn' to the first position
+    cols = result_review_df.columns.tolist()
+    cols = ['SUBMISSION_ID'] + cols[:-1]
+    result_review_df = result_review_df[cols]
+    return s_df,final_result_dataframe, r_df, c_df, rr_df, result_review_df, report.submission_list_elements 
+
+def create_report_route():
+    report, organization_id_used, report_id_used = data_definitions()
+    s3_filename, report_id_present, organization_id_present = get_s3_filename()
+    submission_download_attachment_sizes = []
+    s_df, form_df, review_stage_df, chronology_df, files_df, table_question_df, submission_list = get_dfs()
+    dataframes = [ s_df, form_df, review_stage_df, chronology_df, files_df, table_question_df]
+    folder_ids = [ 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY', 'FOLDER_DIRECTORY']
+    print("The total inputted submission_ids are: ")
+    print(len(submission_list))
+    inputted_submission_total = len(submission_list)
+    zip_objects_list = []
+    zip_dest_paths = []
+    print("Creating S3 session...")
+    dev_s3 = myutils.create_s3_session(access_key, secret_key, region_name)
+    submission_id_set = set(files_df['SUBMISSION_ID'].values)
+    submission_id_form_set = set(form_df['SUBMISSION_ID'].values) 
+
+
+    # Set the S3 AWS connection and first initial creation in DynamoDB
+    aws_session, table_name, organization_id_current, report_id_current, report_name_current, submission_list_current = create_initial_row()
+
+    # Set the S3 destinations for each submission ID
+    checked_count = 0  # Variable to track the count of checked submission IDs
+    total_count = len(submission_list)  # Total count of submission IDs
+    zip_memory = io.BytesIO()  # Initialize the zip_memory variable
+
+    # Set the process for each batch, divide the submission IDs into batches
+    batches = [submission_list[i:i+report.count_per_batch] for i in range(0, total_count, report.count_per_batch)]
+
+    # Calculate the cumulative progress across all batches
+    submissions_adds = 0
+    total_submissions_processed = 0
+
+    # Process each batch
+    for batch_index, batch in enumerate(batches, start=1):
+        checked_count = 0
+        total_count = len(batch)  # Update the total count for each batch
+
+        # Process each submission ID within the current batch
+        for counter, submission_id in enumerate(batch, start=1):
+            checked_count += 1
+            submissions_adds += 1
+            total_submissions_processed += 1
+            if submission_id in submission_id_form_set:
+                submission_forms_df = form_df[form_df['SUBMISSION_ID'] == submission_id]
+
+                # Filter review_stage_df based on the submission ID using query
+                submission_review_df = review_stage_df.query(f'SUBMISSION_ID == {submission_id}')
+                submission_chronology_df = chronology_df[chronology_df['SUBMISSION_ID'] == submission_id]
+                submission_table_df = table_question_df[table_question_df['SUBMISSION_ID'] == submission_id]
+
+                if submission_id in submission_id_set:
+                    submission_files_df = files_df[files_df['SUBMISSION_ID'] == submission_id]
+                    prod_bucket_name = submission_files_df['BUCKET_NAME'].tolist()
+                    prod_object_keys = submission_files_df['STORAGE_KEY'].tolist()
+                    prod_destination_paths = submission_files_df['FOLDER_DIRECTORY'].tolist()
+
+                    # Check if files_df is empty
+                    if files_df.empty:
+                        zip_objects_list = []
+                        zip_dest_paths = []
+                    else:
+                        # Append to the existing lists
+                        zip_objects_list.extend(prod_object_keys)
+                        zip_dest_paths.extend(prod_destination_paths)
+
+                        # Call the function to download files and get the results
+                        zip_objects_list, zip_dest_paths = download_files_from_s3_returns2(prod_bucket_name, prod_object_keys, prod_destination_paths)
+
+                # Add the dataframes to the zip archive using the create_zip_from_memory function
+                zip_memory = create_zip_from_memory(zip_memory_downloads=[],
+                                                    destination_paths=[],
+                                                    dataframes=[s_df, submission_forms_df, submission_review_df, submission_chronology_df, submission_table_df],
+                                                    folder_ids=folder_ids,
+                                                    zip_memory=zip_memory)
+
+                # Rest of the code for processing the submission ID
+
+            # Calculate the percentage of completion within the current batch
+            percentage_complete = (counter / total_count) * 100
+
+            # Calculate the overall progress across all batches
+            overall_progress = ((batch_index - 1) * total_count + counter) / len(submission_list) * 100
+
+            # Calculate the cumulative progress across all batches
+            submissions_adds = (counter)
+
+            # Calculate the percentage of completion for the whole input of submission_ids as it's being processed
+            percentage_processed = round((total_submissions_processed / inputted_submission_total) * 100, 2)
+            percentage_processed_int = int(percentage_processed)
+
+            # Print the counter, the submission ID being processed, and the percentage of completion
+            print(f"Processing item {counter}/{total_count} in Batch {batch_index}/{len(batches)}: {submission_id} ({percentage_complete:.2f}% complete)")
+            print("Use this for dynamodb update which represents cumulative submission number")
+            print(total_submissions_processed)
+            print(f"The percentage of processed submissions {percentage_processed}")
+
+            
+            # Update the DynamoDB table after processing all submission IDs in the batch
+            update_dynamodb( aws_session, table_name,organization_id_current, report_id_current, total_submissions_processed)
+        print(f"The number of submissions completed so far in the batch is {submissions_adds}. The total submissions processed for Batch {batch_index} is {total_submissions_processed}")
+
+
+        # Check if all submission IDs were checked within the current batch
+        if checked_count == total_count:
+            # Define the bucket name and file name
+
+            # Complete the ZIP file
+            complete_memory_zip = create_zip_from_memory(zip_objects_list, zip_dest_paths, dataframes, folder_ids)
+
+            # Upload the ZIP file to S3 bucket
+            myutils.upload_file_to_s3_using_smart_open_with_boto(dev_s3, complete_memory_zip, report.dev_bucket_name, s3_filename)
+    
+    status = ''
+    zip_complete = ''
+    # Check if all submission IDs were checked
+    if total_submissions_processed == len(submission_list):
+        print("All submission IDs were checked")
+        status = 'completed'
+        zip_complete = s3_filename
+    else:
+        print("Not all submission IDs were checked")
+        status = 'incomplete'
+    complete_dynamodb(aws_session, table_name, organization_id_current, report_id_current, status)
+    complete_dynamodb_s3(aws_session, table_name, organization_id_current, report_id_current, zip_complete)
+    print(f"The total submissions processed is: {total_submissions_processed} ")
+    return zip_complete
+
+##########  TEST HERE ###################
+
+# aws_session, table_name, organization_id_current, report_id_current, report_name_current, submission_list_current = create_initial_row()
+# print(organization_id_current)
+# print(report_id_current)
+# for i in range(8):
+#     if i < 8:
+#         print(i)
+#         processed_submissions = i
+#         update_dynamodb( aws_session, table_name,organization_id_current, report_id_current, processed_submissions)
+#         time.sleep(3)
+def create_JSON_s3link():
+    # Call the create_report_route() function
+    zip_complete = create_report_route()
+    report, organization_id_used, report_id_used = data_definitions()
+
+    # Get the pre-signed URL for the uploaded file
+    response = myutils.get_s3_presigned_url(report.dev_bucket_name, zip_complete)
+
+    # Check if the response is not empty
+    if response:
+        # Print the pre-signed URL
+        print(f"Please access the file {zip_complete} at the presigned URL: {response}")
+
+        # Extract the S3 link from the response
+        s3_link = response
+
+        # Example usage
+        presigned_url = s3_link
+        print("Presigned URL:", presigned_url)
+
+        # Create a dictionary to store the response and other information
+        data = {
+            "s3_link": s3_link
+        }
+
+        # Print the JSON structure of the data dictionary
+        json_structure = json.dumps(data)
+        print(json_structure) 
+
+
+create_JSON_s3link() 
