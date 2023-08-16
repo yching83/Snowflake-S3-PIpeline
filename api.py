@@ -11,7 +11,7 @@ import app.single_audit_api.s3_functions as myutils
 import app.single_audit_api.dynamodb_functions as dyno
 
 
-import app.single_audit_api.single_audit_process as main_audit
+import app.single_audit_api.main as main_audit
 
 from fastapi import APIRouter, HTTPException, Path
 
