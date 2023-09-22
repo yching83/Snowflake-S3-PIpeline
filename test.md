@@ -10,7 +10,8 @@ __Contents:__
 - [Part I - Cte2: top_3_product_categories](#part-i---cte2-top_3_product_categories)
 - [Part I - Cte3: product_revenue_order](#part-i---cte3-product_revenue_order)
 - [Part I - Cte4: final_select](#part-i---cte4-final_select)
-- [Part II - Explanation: brooklyn_test](#part-ii---explanation-brooklyn_test)
+- [Part II - Explanation: brooklyn_test](#part-ii---explanation-brooklyn-test)
+
 
 ## Part I - Cte1: order_details
 
