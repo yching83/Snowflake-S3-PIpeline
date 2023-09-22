@@ -127,7 +127,7 @@ GROUP BY
     od.order_purchase_date, od.orders_count, od.customers_making_orders_count, od.revenue_usd
 ORDER BY
     od.order_purchase_date DESC;
-## Part II - Explanation - brooklyn_test
+## part2-test
 - **Purpose**: brooklyn_test is added to make sure that category revenue and/or category product name 
                is validated because of missing order_id from product category, causing the nulls when
                joined by the order_purchase_date, which may cause counts of products or categories to
