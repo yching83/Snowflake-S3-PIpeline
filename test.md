@@ -10,6 +10,7 @@ __Contents:__
 - [Part I - Cte2: top_3_product_categories](#part-i---cte2-top_3_product_categories)
 - [Part I - Cte3: product_revenue_order](#part-i---cte3-product_revenue_order)
 - [Part I - Cte4: final_select](#part-i---cte4-final_select)
+- [Part II - Explanation: brooklyn_test](#part-ii---explanation-brooklyn_test)
 
 ## Part I - Cte1: order_details
 
@@ -124,6 +125,17 @@ GROUP BY
     od.order_purchase_date, od.orders_count, od.customers_making_orders_count, od.revenue_usd
 ORDER BY
     od.order_purchase_date DESC;
+## Part II - Explanation: brooklyn_test & brooklyn_rolling_avg
+- **Purpose**: brooklyn_test is added to make sure that category revenue and/or category product name 
+               is validated because of missing order_id from product category, causing the nulls when
+               joined by the order_purchase_date, which may cause counts of products or categories to
+               be misaligned. 
+- **Questions**: For verification, there may be a need to understand more about the upstream process 
+                 for tables products and category to make sure that these are updated appropriately.  
+- **Additionals**: There are definitely additional information for further analysis.  These can include 
+                   finding time series data between purchased and delivered and comparing to the delivery
+                   time, and also supporting demographic analysis because of availability of customer
+                   data using zipcode and region using state and city data.
 
 
 
