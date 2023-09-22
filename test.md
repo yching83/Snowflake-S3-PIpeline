@@ -114,13 +114,13 @@ __Contents:__
         (ROUND(CAST((CAST(t3pc.category_revenue AS numeric) / od.revenue_usd) * 100 AS numeric), 2))::text,
         ', '
     ) AS top_3_product_categories_revenue_percentage
-FROM
-    order_details od
-LEFT JOIN
-    product_revenue_order t3pc
-ON
-    od.order_purchase_date = t3pc.order_purchase_date AND t3pc.row_num <= 3
-GROUP BY
-    od.order_purchase_date, od.orders_count, od.customers_making_orders_count, od.revenue_usd
-ORDER BY
-    od.order_purchase_date DESC
+  FROM
+      order_details od
+  LEFT JOIN
+      product_revenue_order t3pc
+  ON
+      od.order_purchase_date = t3pc.order_purchase_date AND t3pc.row_num <= 3
+  GROUP BY
+      od.order_purchase_date, od.orders_count, od.customers_making_orders_count, od.revenue_usd
+  ORDER BY
+      od.order_purchase_date DESC
