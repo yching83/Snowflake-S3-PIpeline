@@ -8,6 +8,8 @@ __Contents:__
 
 - [Part I - Cte1: order_details](#part-i---cte1-order_details)
 - [Part I - Cte2: top_3_product_categories](#part-i---cte2-top_3_product_categories)
+- [Part I - Cte3: product_revenue_order](#part-i---cte3-product_revenue_order)
+- [Part I - Cte4: final_select](#part-i---cte4-final_select)
 
 ## Part I - Cte1: order_details
 
@@ -71,3 +73,66 @@ __Contents:__
   ORDER BY
       order_purchase_date,
       category_revenue DESC
+## Part I - Cte3: product_revenue_order
+
+- **Purpose**: The product_revenue_order is creating a cte to create
+               order_purchase_date, product_category_name, category_revenue, and row_number
+               based on order_purchase_date within descending category_revenue.  
+               This cte is created from top_3_product_categories, with lowest row_number 
+               representing the highest category revenue for the specific order dates.
+- **Description**: This creates order_purchase_date, product_category_name, category_revenue, and row_number. 
+                   The primary key of this CTE is set on order_purchase_date.
+- **Code**:
+  ```sql
+        SELECT
+            order_purchase_date,
+            product_category_name,
+            category_revenue,
+            ROW_NUMBER() OVER (PARTITION BY order_purchase_date ORDER BY category_revenue DESC) AS row_num
+        FROM
+            top_3_product_categories
+## Part I - Cte4: final_select
+
+    od.order_purchase_date,
+    od.orders_count,
+    od.customers_making_orders_count,
+    ROUND(CAST(od.revenue_usd AS numeric), 2)::double precision AS revenue_usd,
+    CAST(AVG(CAST(od.revenue_usd AS numeric) / od.orders_count) AS double precision)::numeric(10,2) AS average_revenue_per_order_usd,
+    STRING_AGG(t3pc.product_category_name, ', ') AS top_3_product_categories_by_revenue,
+    STRING_AGG(
+        (ROUND(CAST((CAST(t3pc.category_revenue AS numeric) / od.revenue_usd) * 100 AS numeric), 2))::text,
+        ', '
+    ) AS top_3_product_categories_revenue_percentage
+
+- **Purpose**: The final select creates the necessary field columns from the above ctes 
+               for order_purchase_date, orders_count, customers_making_orders_count,
+               revenue_usd, average_revenue_per_order_usd, top_3_product_categories_by_revenue,
+               and top_3_product_categories_revenue_percentage.
+               Formulas are created to create double decimal precision for revenue_usd,
+               average_revenue_per_order_usd, and top_3_product_categories_revenue_percentage
+               based on key order_purchase_date.  
+- **Description**: This creates data based on requirements from assessment part I.
+                   The primary key of this CTE is set on order_purchase_date.
+- **Code**:
+  ```sql
+    SELECT
+    od.order_purchase_date,
+    od.orders_count,
+    od.customers_making_orders_count,
+    ROUND(CAST(od.revenue_usd AS numeric), 2)::double precision AS revenue_usd,
+    CAST(AVG(CAST(od.revenue_usd AS numeric) / od.orders_count) AS double precision)::numeric(10,2) AS average_revenue_per_order_usd,
+    STRING_AGG(t3pc.product_category_name, ', ') AS top_3_product_categories_by_revenue,
+    STRING_AGG(
+        (ROUND(CAST((CAST(t3pc.category_revenue AS numeric) / od.revenue_usd) * 100 AS numeric), 2))::text,
+        ', '
+    ) AS top_3_product_categories_revenue_percentage
+FROM
+    order_details od
+LEFT JOIN
+    product_revenue_order t3pc
+ON
+    od.order_purchase_date = t3pc.order_purchase_date AND t3pc.row_num <= 3
+GROUP BY
+    od.order_purchase_date, od.orders_count, od.customers_making_orders_count, od.revenue_usd
+ORDER BY
+    od.order_purchase_date DESC
