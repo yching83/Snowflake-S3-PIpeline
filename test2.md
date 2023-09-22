@@ -5,6 +5,8 @@ possible analysis further.
 
 __Contents:__
 - [Part II - Explanation - brooklyn_test](#part-ii---explanation---brooklyn_test)
+- [Part II - Explanation - brooklyn_rolling_avg](#part-ii---explanation---brooklyn_rolling_avg)
+- [Part II - Explanation - brooklyn_data_report](#part-ii---explanation---brooklyn_data_report)
 
 
 
@@ -19,3 +21,12 @@ __Contents:__
                    finding time series data between purchased and delivered and comparing to the delivery
                    time, and also supporting demographic analysis because of availability of customer
                    data using zipcode and region using state and city data.
+
+## Part II - Explanation - brooklyn_rolling_avg
+- **Purpose**: brooklyn_rolling just lends a bit more to finding averages by current and 2 preceding
+               months for average amounts of revenue per order, and customer counts.
+
+## Part II - Explanation - brooklyn_data_report
+- **Purpose**:  Using brooklyn_part1, brooklyn_rolling_avg, and brooklyn_test; graphs indicate some
+                comparisons in terms of order revenue vs customers, and gaps of product order_ids in the data
+                by month for tracking of potential database update misalignments.
