@@ -92,18 +92,6 @@ __Contents:__
         FROM
             top_3_product_categories
 ## Part I - Cte4: final_select
-
-    od.order_purchase_date,
-    od.orders_count,
-    od.customers_making_orders_count,
-    ROUND(CAST(od.revenue_usd AS numeric), 2)::double precision AS revenue_usd,
-    CAST(AVG(CAST(od.revenue_usd AS numeric) / od.orders_count) AS double precision)::numeric(10,2) AS average_revenue_per_order_usd,
-    STRING_AGG(t3pc.product_category_name, ', ') AS top_3_product_categories_by_revenue,
-    STRING_AGG(
-        (ROUND(CAST((CAST(t3pc.category_revenue AS numeric) / od.revenue_usd) * 100 AS numeric), 2))::text,
-        ', '
-    ) AS top_3_product_categories_revenue_percentage
-
 - **Purpose**: The final select creates the necessary field columns from the above ctes 
                for order_purchase_date, orders_count, customers_making_orders_count,
                revenue_usd, average_revenue_per_order_usd, top_3_product_categories_by_revenue,
